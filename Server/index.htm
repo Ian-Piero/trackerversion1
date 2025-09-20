@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Rastreador GPS con Historial</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine/dist/leaflet-routing-machine.css" />
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f4f4f4;
+      color: #333;
+    }
+    header {
+      background: #2c3e50;
+      color: white;
+      padding: 15px 20px;
+      font-size: 18px;
+      font-weight: bold;
+      text-align: center;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      z-index: 1000;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+    }
+    #container {
+      display: flex;
+      margin-top: 60px;
+      height: calc(100vh - 60px);
+    }
+    #sidebar {
+      width: 300px;
+      background: #ffffff;
+      border-right: 1px solid #ccc;
+      padding: 15px;
+      overflow-y: auto;
+    }
+    #sidebar h3 {
+      margin-top: 0;
+      font-size: 16px;
+      color: #2c3e50;
+    }
+    .device-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+    .color-box {
+      width: 14px;
+      height: 14px;
+      margin-right: 8px;
+      border-radius: 3px;
+    }
+    #map {
+      flex: 1;
+    }
+    #search-container {
+      margin-top: 20px;
+    }
+    #search-box {
+      width: 100%;
+      padding: 6px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    #suggestions {
+      border: 1px solid #ccc;
+      background: white;
+      position: absolute;
+      max-height: 150px;
+      overflow-y: auto;
+      width: 260px;
+      z-index: 2000;
+    }
+    .suggestion {
+      padding: 5px;
+      cursor: pointer;
+    }
+    .suggestion:hover {
+      background: #eee;
+    }
+    #route-btn, #clear-btn {
+      display: none;
+      margin-top: 10px;
+      width: 100%;
+      padding: 8px;
+      font-size: 14px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    #route-btn { background: #27ae60; color: white; }
+    #clear-btn { background: #c0392b; color: white; }
+  </style>
+</head>
+<body>
+  <header>Rastreador GPS - Ian Yana (200865)</header>
+  <div id="container">
+    <div id="sidebar">
+      <h3>Dispositivos Activos</h3>
+      <div id="device-list">Cargando...</div>
+
+```
+  <div id="search-container">
+    <h3>Buscar ubicación</h3>
+    <input type="text" id="search-box" placeholder="Escribe una ubicación...">
+    <div id="suggestions"></div>
+    <button id="route-btn">Trazar Ruta</button>
+    <button id="clear-btn">Limpiar Ruta</button>
+  </div>
+</div>
+<div id="map"></div>
+```
+
+  </div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <script src="https://unpkg.com/leaflet-routing-machine/dist/leaflet-routing-machine.js"></script>
+
+  <script>
+    var map = L.map('map').setView([0, 0], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    var markers = {};
+    var polylines = {};
+    var deviceColors = {};
+    var routingControl = null;
+    var destinationMarker = null;
+    var destinationCoords = null;
+
+    // Crear ícono de pin con color dinámico
+    function createColoredIcon(color) {
+      const svgIcon = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="48" viewBox="0 0 32 48">
+          <path d="M16 0C7.2 0 0 7.2 0 16c0 12 16 32 16 32s16-20 16-32C32 7.2 24.8 0 16 0z" fill="${color}"/>
+          <circle cx="16" cy="16" r="6" fill="white"/>
+        </svg>`;
+      return L.icon({
+        iconUrl: "data:image/svg+xml;base64," + btoa(svgIcon),
+        iconSize: [32, 48],
+        iconAnchor: [16, 48],
+        popupAnchor: [0, -48]
+      });
+    }
+
+    function getRandomColor() {
+      const hue = Math.floor(Math.random() * 360);
+      return `hsl(${hue}, 80%, 50%)`;
+    }
+
+    async function fetchLocations() {
+      try {
+        const response = await fetch('get_locations.php');
+        const data = await response.json();
+
+        const deviceList = document.getElementById('device-list');
+        deviceList.innerHTML = '';
+
+        for (const id in data) {
+          const history = data[id];
+          const latlngs = history.map(loc => [
+            parseFloat(loc.lat),
+            parseFloat(loc.lon)
+          ]);
+          if (latlngs.length === 0) continue;
+          const lastPoint = latlngs[latlngs.length - 1];
+
+          if (!deviceColors[id]) {
+            deviceColors[id] = getRandomColor();
+          }
+          const color = deviceColors[id];
+
+          // Lista lateral
+          const item = document.createElement('div');
+          item.className = 'device-item';
+          item.innerHTML = `<div class="color-box" style="background:${color}"></div>${id}`;
+          deviceList.appendChild(item);
+
+          // Marcador tipo pin
+          if (!markers[id]) {
+            markers[id] = L.marker(lastPoint, {
+              icon: createColoredIcon(color)
+            }).addTo(map)
+              .bindPopup(`ID: ${id}<br>Última: ${lastPoint[0]}, ${lastPoint[1]}`);
+            map.setView(lastPoint, 15);
+          } else {
+            markers[id].setLatLng(lastPoint);
+            markers[id].setIcon(createColoredIcon(color));
+            markers[id].bindPopup(`ID: ${id}<br>Última: ${lastPoint[0]}, ${lastPoint[1]}`);
+          }
+
+          // Polilínea historial
+          if (polylines[id]) {
+            polylines[id].setLatLngs(latlngs);
+          } else {
+            polylines[id] = L.polyline(latlngs, {
+              color: color,
+              weight: 3,
+              opacity: 0.8
+            }).addTo(map);
+          }
+        }
+
+        // Remover dispositivos inactivos
+        for (const id in markers) {
+          if (!data[id]) {
+            map.removeLayer(markers[id]);
+            delete markers[id];
+            if (polylines[id]) {
+              map.removeLayer(polylines[id]);
+              delete polylines[id];
+            }
+            delete deviceColors[id];
+          }
+        }
+      } catch (error) {
+        console.error('Error cargando ubicaciones:', error);
+      }
+    }
+
+    setInterval(fetchLocations, 3000);
+    fetchLocations();
+
+    // --- Búsqueda con sugerencias ---
+    const searchInput = document.getElementById("search-box");
+    const suggestionsBox = document.getElementById("suggestions");
+    const routeBtn = document.getElementById("route-btn");
+    const clearBtn = document.getElementById("clear-btn");
+
+    searchInput.addEventListener("input", async function () {
+      const query = this.value;
+      if (query.length < 3) {
+        suggestionsBox.innerHTML = "";
+        return;
+      }
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
+      const response = await fetch(url);
+      const results = await response.json();
+      suggestionsBox.innerHTML = "";
+      results.forEach(place => {
+        const div = document.createElement("div");
+        div.className = "suggestion";
+        div.innerText = place.display_name;
+        div.addEventListener("click", () => {
+          map.setView([place.lat, place.lon], 15);
+          if (destinationMarker) map.removeLayer(destinationMarker);
+          destinationMarker = L.marker([place.lat, place.lon]).addTo(map)
+            .bindPopup(place.display_name).openPopup();
+          destinationCoords = [place.lat, place.lon];
+          suggestionsBox.innerHTML = "";
+          searchInput.value = place.display_name;
+          routeBtn.style.display = "block";
+          clearBtn.style.display = "block";
+        });
+        suggestionsBox.appendChild(div);
+      });
+    });
+
+    // --- Botón trazar ruta ---
+    routeBtn.addEventListener("click", () => {
+      const firstDeviceId = Object.keys(markers)[0];
+      if (!firstDeviceId || !destinationCoords) {
+        alert("No hay dispositivo activo o destino seleccionado.");
+        return;
+      }
+      const deviceLatLng = markers[firstDeviceId].getLatLng();
+      if (routingControl) map.removeControl(routingControl);
+      routingControl = L.Routing.control({
+        waypoints: [
+          L.latLng(deviceLatLng.lat, deviceLatLng.lng),
+          L.latLng(destinationCoords[0], destinationCoords[1])
+        ],
+        routeWhileDragging: true
+      }).addTo(map);
+    });
+
+    // --- Limpiar ruta y destino ---
+    clearBtn.addEventListener("click", () => {
+      if (routingControl) {
+        map.removeControl(routingControl);
+        routingControl = null;
+      }
+      if (destinationMarker) {
+        map.removeLayer(destinationMarker);
+        destinationMarker = null;
+        destinationCoords = null;
+      }
+      routeBtn.style.display = "none";
+      clearBtn.style.display = "none";
+      searchInput.value = "";
+
+      // Centrar en los dispositivos activos
+      let allLatLngs = [];
+      for (const id in markers) {
+        if (markers[id]) {
+          allLatLngs.push(markers[id].getLatLng());
+        }
+      }
+      if (allLatLngs.length > 0) {
+        const bounds = L.latLngBounds(allLatLngs);
+        map.fitBounds(bounds, { padding: [50, 50] });
+      } else {
+        map.setView([0, 0], 2);
+      }
+    });
+  </script>
+
+</body>
+</html>
